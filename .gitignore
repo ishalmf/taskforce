@@ -3,3 +3,11 @@ dist/
 src-tauri/target/
 .DS_Store
 *.log
+__pycache__/
+*.py[cod]
+*$py.class
+.agents/
+.env
+.venv
+env/
+venv/
