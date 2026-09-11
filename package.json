@@ -1,0 +1,26 @@
+{
+  "name": "taskforce",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "prebuild": "npm run generate:assets",
+    "build": "tsc && vite build",
+    "generate:assets": "node scripts/generate-assets.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "tauri": "tauri",
+    "notify": "python3 scripts/desktop_notifier.py",
+    "notify:test": "python3 scripts/desktop_notifier.py --test --bg",
+    "notify:help": "python3 scripts/desktop_notifier.py --status help --bg",
+    "notify:drag": "python3 scripts/desktop_notifier.py --drag"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}

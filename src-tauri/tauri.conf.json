@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Taskforce",
+  "version": "0.1.0",
+  "identifier": "dev.taskforce.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "settings",
+        "title": "Taskforce",
+        "width": 920,
+        "height": 760,
+        "minWidth": 620,
+        "minHeight": 640,
+        "visible": false,
+        "center": true
+      },
+      {
+        "label": "overlay",
+        "title": "Taskforce Signal",
+        "url": "index.html?view=overlay",
+        "width": 180,
+        "height": 180,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": false,
+        "focus": false,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: data:; media-src 'self' asset:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "shortDescription": "Animated completion signals for coding agents",
+    "longDescription": "Taskforce displays a small animated character and plays a sound when a supported coding agent completes its work."
+  }
+}
