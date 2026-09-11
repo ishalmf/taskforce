@@ -500,6 +500,10 @@ def handle_hook_stop():
             if is_subagent_transcript(transcript_path) or has_pending_work(transcript_path):
                 return
 
+        # Ensure the agent engine reports fullyIdle (all background tasks done)
+        if payload.get("fullyIdle") is False:
+            return
+
         termination = payload.get("terminationReason", "model_stop")
         if termination in ("model_stop", "normal", None, ""):
             if not mark_and_check_step(conv_id, step_idx, event_type="completed"):
