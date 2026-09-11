@@ -349,6 +349,80 @@ def handle_hook_tool():
         sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
         sys.stdout.flush()
 
+def run_watcher():
+    brain_dir = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+    last_notified_step = {}
+
+    # Initialize with current latest step_index to avoid alerting on old historical turns
+    if brain_dir.exists():
+        for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
+            conv_id = conv_path.parent.parent.parent.name
+            try:
+                with open(conv_path, "r", encoding="utf-8") as f:
+                    f.seek(max(0, os.path.getsize(conv_path) - 8192))
+                    lines = f.readlines()
+                    if lines:
+                        last_obj = json.loads(lines[-1].strip())
+                        last_notified_step[conv_id] = last_obj.get("step_index", 0)
+            except Exception:
+                pass
+
+    print(f"Taskforce watcher active. Monitoring active sessions across all terminals...")
+    while True:
+        try:
+            time.sleep(0.6)
+            if not brain_dir.exists():
+                continue
+            now = time.time()
+            for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
+                conv_id = conv_path.parent.parent.parent.name
+                try:
+                    mtime = os.path.getmtime(conv_path)
+                    if now - mtime > 300:  # Skip sessions idle for more than 5 minutes
+                        continue
+
+                    with open(conv_path, "r", encoding="utf-8") as f:
+                        size = os.path.getsize(conv_path)
+                        f.seek(max(0, size - 8192))
+                        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+                        if not lines:
+                            continue
+                        last_line = lines[-1]
+                        data = json.loads(last_line)
+                        step_idx = data.get("step_index", 0)
+                        last_seen = last_notified_step.get(conv_id, 0)
+                        if step_idx <= last_seen:
+                            continue
+
+                        source = data.get("source")
+                        msg_type = data.get("type")
+                        status = data.get("status")
+
+                        if source == "MODEL" and msg_type == "PLANNER_RESPONSE" and status == "DONE":
+                            tool_calls = data.get("tool_calls", [])
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    if tc.get("name") == "ask_question":
+                                        last_notified_step[conv_id] = step_idx
+                                        subprocess.Popen(
+                                            [sys.executable, str(Path(__file__).resolve()), "--status", "help", "--bg"],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                                        )
+                                        break
+                            else:
+                                # Agent completed response and finished its turn!
+                                last_notified_step[conv_id] = step_idx
+                                subprocess.Popen(
+                                    [sys.executable, str(Path(__file__).resolve()), "--status", "completed", "--bg"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                                )
+                except Exception:
+                    pass
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            time.sleep(1)
+
 def main():
     parser = argparse.ArgumentParser(description="Taskforce Agent Desktop Notifier")
     parser.add_argument("--status", choices=["completed", "help"], default="completed", help="Event status")
@@ -362,8 +436,20 @@ def main():
     parser.add_argument("--bg", action="store_true", help="Run detached in background (non-blocking for hooks)")
     parser.add_argument("--hook-stop", action="store_true", help="Antigravity Stop lifecycle hook runner")
     parser.add_argument("--hook-tool", action="store_true", help="Antigravity PreToolUse lifecycle hook runner")
+    parser.add_argument("--watch", action="store_true", help="Run background watcher for all active terminal sessions")
+    parser.add_argument("--daemon", action="store_true", help="Spawn watcher detached in the background")
 
     args = parser.parse_args()
+
+    if args.daemon:
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--watch"]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print("Taskforce background watcher started.")
+        return
+
+    if args.watch:
+        run_watcher()
+        return
 
     if args.hook_stop:
         handle_hook_stop()
