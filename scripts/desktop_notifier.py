@@ -235,22 +235,42 @@ class AgentPopup(Gtk.Window):
         desc_lbl.set_max_width_chars(32)
         text_box.pack_start(desc_lbl, False, False, 0)
 
+        self.desc_lbl = desc_lbl
+        self.auto_close_timer = None
+        self.has_moved = False
+
+        if self.drag_mode:
+            btn_done = Gtk.Button(label="✔ Done")
+            btn_done.get_style_context().add_class("action-btn")
+            btn_done.connect("clicked", lambda w: self.close_popup())
+            main_box.pack_end(btn_done, False, False, 0)
+
         main_box.pack_start(text_box, True, True, 0)
         self.add(main_box)
 
-        # Mouse events
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
+        # Mouse and keyboard events
+        self.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.KEY_PRESS_MASK
+        )
         self.connect("button-press-event", self.on_button_press)
         self.connect("button-release-event", self.on_button_release)
         self.connect("motion-notify-event", self.on_motion)
+        self.connect("key-press-event", self.on_key_press)
 
         # Calculate position after realized
         self.connect("realize", self.on_realize)
 
-        # Dismiss timer
+        # Dismiss timer for normal notifications
         if not self.drag_mode:
             duration_ms = self.config.get("duration_ms", 4000)
             GLib.timeout_add(duration_ms, self.close_popup)
+
+    def on_key_press(self, widget, event):
+        if event.keyval in (Gdk.KEY_Escape, Gdk.KEY_Return, Gdk.KEY_space):
+            self.close_popup()
 
     def on_realize(self, widget):
         self.reposition()
@@ -295,11 +315,14 @@ class AgentPopup(Gtk.Window):
     def on_button_press(self, widget, event):
         if event.button == 1:  # Left click
             if self.drag_mode:
+                self.has_moved = False
                 self.dragging = True
                 self.drag_start_x = event.x_root
                 self.drag_start_y = event.y_root
             else:
                 self.close_popup()
+        elif event.button in (2, 3):  # Right or middle click
+            self.close_popup()
 
     def on_button_release(self, widget, event):
         if self.drag_mode and self.dragging:
@@ -311,16 +334,31 @@ class AgentPopup(Gtk.Window):
             save_config(self.config)
             print(f"Saved custom position: ({cur_x}, {cur_y})")
 
+            if self.has_moved:
+                self.desc_lbl.set_markup('<span font_size="9500" color="#34d399">✔ Saved! Click [Done] or anywhere to close</span>')
+                if self.auto_close_timer:
+                    GLib.source_remove(self.auto_close_timer)
+                # Auto-dismiss 3 seconds after releasing
+                self.auto_close_timer = GLib.timeout_add(3000, self.close_popup)
+            else:
+                # Clicked without dragging -> user intends to close
+                self.close_popup()
+
     def on_motion(self, widget, event):
         if self.drag_mode and self.dragging:
             dx = event.x_root - self.drag_start_x
             dy = event.y_root - self.drag_start_y
+            if abs(dx) > 2 or abs(dy) > 2:
+                self.has_moved = True
             cur_x, cur_y = self.get_position()
             self.move(int(cur_x + dx), int(cur_y + dy))
             self.drag_start_x = event.x_root
             self.drag_start_y = event.y_root
 
     def close_popup(self):
+        if self.auto_close_timer:
+            GLib.source_remove(self.auto_close_timer)
+            self.auto_close_timer = None
         self.destroy()
         Gtk.main_quit()
         return False
