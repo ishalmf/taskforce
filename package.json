@@ -13,7 +13,8 @@
     "notify": "python3 scripts/desktop_notifier.py",
     "notify:test": "python3 scripts/desktop_notifier.py --test --bg",
     "notify:help": "python3 scripts/desktop_notifier.py --status help --bg",
-    "notify:drag": "python3 scripts/desktop_notifier.py --drag"
+    "notify:drag": "python3 scripts/desktop_notifier.py --drag",
+    "settings": "python3 scripts/settings_gui.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1"

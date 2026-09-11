@@ -467,8 +467,14 @@ def main():
     parser.add_argument("--hook-tool", action="store_true", help="Antigravity PreToolUse lifecycle hook runner")
     parser.add_argument("--watch", action="store_true", help="Run background watcher for all active terminal sessions")
     parser.add_argument("--daemon", action="store_true", help="Spawn watcher detached in the background")
+    parser.add_argument("--gui", "--settings", dest="gui", action="store_true", help="Open visual Settings UI")
 
     args = parser.parse_args()
+
+    if args.gui:
+        settings_script = Path(__file__).resolve().parent / "settings_gui.py"
+        subprocess.Popen([sys.executable, str(settings_script)])
+        return
 
     if args.daemon:
         cmd = [sys.executable, str(Path(__file__).resolve()), "--watch"]
