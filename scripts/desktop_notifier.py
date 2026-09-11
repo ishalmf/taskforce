@@ -359,24 +359,47 @@ def show_popup(status="completed", message=None, config=None, drag_mode=False):
     popup.show_all()
     Gtk.main()
 
-def should_throttle(status="completed", min_interval=4.0):
-    """Prevent spamming multiple notifications within a short window."""
-    cooldown_file = Path("/tmp/taskforce_last_notify")
+NOTIFIED_STEPS_FILE = Path("/tmp/taskforce_notified_steps")
+
+def mark_and_check_step(conv_id, step_idx, event_type="completed", min_gap=1.0):
+    """
+    Ensure each conversation turn (whether tools were used or pure thinking/chat)
+    is notified exactly once, eliminating duplicate popups without dropping turns.
+    """
     now = time.time()
-    if cooldown_file.exists():
+    key = f"{conv_id}:{step_idx}:{event_type}"
+    notified = {}
+
+    if NOTIFIED_STEPS_FILE.exists():
         try:
-            with open(cooldown_file, "r") as f:
-                last_time = float(f.read().strip())
-                if now - last_time < min_interval:
-                    return True
+            with open(NOTIFIED_STEPS_FILE, "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) == 2:
+                        notified[parts[0]] = float(parts[1])
         except Exception:
             pass
+
+    # If this exact step was already notified within the last 120s, skip duplicate
+    if key in notified and (now - notified[key]) < 120:
+        return False
+
+    # Prevent instant sound/popup collision within min_gap (1.0s)
+    for k, t in notified.items():
+        if now - t < min_gap:
+            return False
+
+    notified[key] = now
+    # Clean up entries older than 300 seconds
+    cleaned = {k: t for k, t in notified.items() if now - t < 300}
     try:
-        with open(cooldown_file, "w") as f:
-            f.write(str(now))
+        with open(NOTIFIED_STEPS_FILE, "w") as f:
+            for k, t in cleaned.items():
+                f.write(f"{k} {t}\n")
     except Exception:
         pass
-    return False
+
+    return True
 
 SUBAGENT_CACHE = {}
 
@@ -470,17 +493,22 @@ def handle_hook_stop():
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
         transcript_path = payload.get("transcriptPath")
+        conv_id = payload.get("conversationId", "unknown")
+        step_idx = payload.get("stepIdx", 0)
+
         if transcript_path:
             if is_subagent_transcript(transcript_path) or has_pending_work(transcript_path):
                 return
 
-        if should_throttle("completed", min_interval=4.0):
-            return
-
         termination = payload.get("terminationReason", "model_stop")
         if termination in ("model_stop", "normal", None, ""):
+            if not mark_and_check_step(conv_id, step_idx, event_type="completed"):
+                return
+            env = os.environ.copy()
+            if "DISPLAY" not in env:
+                env["DISPLAY"] = ":0"
             cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
     finally:
@@ -492,21 +520,27 @@ def handle_hook_tool():
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
         transcript_path = payload.get("transcriptPath")
+        conv_id = payload.get("conversationId", "unknown")
+        step_idx = payload.get("stepIdx", 0)
+
         if transcript_path and is_subagent_transcript(transcript_path):
             return
 
         tool_call = payload.get("toolCall", {})
         tool_name = tool_call.get("name", "")
         if tool_name == "ask_question":
-            if should_throttle("help", min_interval=3.0):
+            if not mark_and_check_step(conv_id, step_idx, event_type="help"):
                 return
+            env = os.environ.copy()
+            if "DISPLAY" not in env:
+                env["DISPLAY"] = ":0"
             cmd = [
                 sys.executable,
                 str(Path(__file__).resolve()),
                 "--status", "help",
                 "--message", "Agent needs your answer to proceed!"
             ]
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
     finally:
@@ -590,7 +624,7 @@ def run_watcher():
                             for tc in tool_calls:
                                 if tc.get("name") == "ask_question":
                                     last_notified_step[conv_id] = step_idx
-                                    if not should_throttle("help", min_interval=3.0):
+                                    if mark_and_check_step(conv_id, step_idx, event_type="help"):
                                         cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "help"]
                                         subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                     break
@@ -599,9 +633,9 @@ def run_watcher():
                             if has_pending_work(conv_path):
                                 continue
 
-                            # 3. True completion! Turn finished with no pending work
+                            # 3. True completion! (Covers both tool execution tasks AND pure thinking/talk responses)
                             last_notified_step[conv_id] = step_idx
-                            if not should_throttle("completed", min_interval=4.0):
+                            if mark_and_check_step(conv_id, step_idx, event_type="completed"):
                                 cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
                                 subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
