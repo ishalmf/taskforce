@@ -208,7 +208,7 @@ class AgentPopup(Gtk.Window):
         # Status title & text
         if self.drag_mode:
             title_text = "Drag to Position"
-            desc_text = "Drag to preferred spot & click to save"
+            desc_text = "Drag to preferred spot and click to save"
             badge_color = "#60a5fa"
         elif self.status == "help":
             title_text = "Agent Needs Help"
@@ -219,13 +219,17 @@ class AgentPopup(Gtk.Window):
             desc_text = self.message or "Ready for your next instruction!"
             badge_color = "#34d399"
 
+        import html
+        escaped_title = html.escape(title_text)
+        escaped_desc = html.escape(desc_text)
+
         title_lbl = Gtk.Label()
-        title_lbl.set_markup(f'<span font_weight="bold" font_size="11500" color="{badge_color}">✦ {title_text}</span>')
+        title_lbl.set_markup(f'<span font_weight="bold" font_size="11500" color="{badge_color}">✦ {escaped_title}</span>')
         title_lbl.set_halign(Gtk.Align.START)
         text_box.pack_start(title_lbl, False, False, 0)
 
         desc_lbl = Gtk.Label()
-        desc_lbl.set_markup(f'<span font_size="9500" color="#f1f5f9">{desc_text}</span>')
+        desc_lbl.set_markup(f'<span font_size="9500" color="#f1f5f9">{escaped_desc}</span>')
         desc_lbl.set_halign(Gtk.Align.START)
         desc_lbl.set_line_wrap(True)
         desc_lbl.set_max_width_chars(32)

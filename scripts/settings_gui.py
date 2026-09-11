@@ -542,7 +542,13 @@ class SettingsWindow(Gtk.Window):
             pass
 
     def on_start_drag(self, button):
-        subprocess.Popen([sys.executable, str(NOTIFIER_SCRIPT), "--drag"])
+        p = subprocess.Popen([sys.executable, str(NOTIFIER_SCRIPT), "--drag"])
+        import threading
+        def wait_and_update():
+            p.wait()
+            self.config = load_config()
+            GLib.idle_add(lambda: self.combo_pos.set_active_id("custom"))
+        threading.Thread(target=wait_and_update, daemon=True).start()
 
     def collect_config(self):
         cfg = self.config.copy()
@@ -553,7 +559,14 @@ class SettingsWindow(Gtk.Window):
         cfg["sound_enabled"] = self.switch_sound.get_active()
         cfg["volume"] = round(self.scale_volume.get_value() / 100.0, 2)
         cfg["duration_ms"] = int(self.scale_duration.get_value() * 1000)
-        cfg["position"] = self.combo_pos.get_active_id() or "bottom-right"
+        chosen_pos = self.combo_pos.get_active_id() or "bottom-right"
+        cfg["position"] = chosen_pos
+        if chosen_pos != "custom":
+            cfg["custom_x"] = None
+            cfg["custom_y"] = None
+        else:
+            cfg["custom_x"] = self.config.get("custom_x")
+            cfg["custom_y"] = self.config.get("custom_y")
         cfg["card_background"] = self.entry_bg.get_text().strip()
         cfg["border_completed"] = self.entry_border_comp.get_text().strip()
         cfg["border_help"] = self.entry_border_help.get_text().strip()
