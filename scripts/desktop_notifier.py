@@ -36,6 +36,10 @@ DEFAULT_CONFIG = {
     "completed_sound": str(DEFAULT_ASSETS_DIR / "taskforce-chime.wav"),
     "help_gif": str(DEFAULT_ASSETS_DIR / "taskforce-help.gif"),
     "help_sound": str(DEFAULT_ASSETS_DIR / "taskforce-help.wav"),
+    "card_background": "rgba(15, 23, 42, 0.94)",
+    "border_completed": "#34d399",
+    "border_help": "#fbbf24",
+    "border_radius": 16,
 }
 
 def load_config():
@@ -61,7 +65,21 @@ def play_sound(sound_file, volume=0.8):
     if not sound_file or not os.path.exists(sound_file):
         return
     
-    # Try canberra-gtk-play first
+    # Try mpv first (supports all audio formats: MP3, WAV, OGG, AAC, FLAC, M4A)
+    try:
+        vol = int(max(0.0, min(1.0, volume)) * 100)
+        res = subprocess.run(
+            ["mpv", "--no-video", f"--volume={vol}", sound_file],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4
+        )
+        if res.returncode == 0:
+            return
+    except Exception:
+        pass
+
+    # Try canberra-gtk-play
     try:
         res = subprocess.run(
             ["canberra-gtk-play", "--file=" + sound_file],
@@ -123,25 +141,30 @@ class AgentPopup(Gtk.Window):
         if visual and screen.is_composited():
             self.set_visual(visual)
 
-        # Style with GTK CSS
+        # Style with GTK CSS using config
+        card_bg = self.config.get("card_background", "rgba(15, 23, 42, 0.94)")
+        border_comp = self.config.get("border_completed", "#34d399")
+        border_help = self.config.get("border_help", "#fbbf24")
+        radius = self.config.get("border_radius", 16)
+
         css_provider = Gtk.CssProvider()
-        css = """
-        window {
+        css = f"""
+        window {{
             background-color: transparent;
-        }
-        .agent-card {
-            background-color: rgba(15, 23, 42, 0.94);
-            border-radius: 16px;
-            border: 2px solid #34d399;
+        }}
+        .agent-card {{
+            background-color: {card_bg};
+            border-radius: {radius}px;
+            border: 2px solid {border_comp};
             padding: 14px 18px;
             box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-        }
-        .agent-card.status-help {
-            border-color: #fbbf24;
-        }
-        .agent-card.status-drag {
+        }}
+        .agent-card.status-help {{
+            border-color: {border_help};
+        }}
+        .agent-card.status-drag {{
             border-color: #60a5fa;
-        }
+        }}
         """
         css_provider.load_from_data(css.encode('utf-8'))
         Gtk.StyleContext.add_provider_for_screen(
