@@ -17,10 +17,33 @@ The application runs locally in the system tray. It does not read or transmit pr
   - **Task Complete** (emerald theme, victory mascot animation, pleasant two-tone chime).
   - **Needs User Help / Confirmation** (amber theme, curious mascot animation, attention chime).
 - **Flexible Screen Placement**:
-  - Drag mode: `taskforce-notify --drag` lets you grab and drag the mascot anywhere on screen.
+  - Drag mode: `taskforce-notify --drag` lets you grab and drag the mascot anywhere on screen with 60fps smoothness.
   - Position presets: `bottom-right`, `top-right`, `bottom-left`, `top-left`, `center`.
+- **Visual Desktop Settings UI**: Change pictures, sounds, volume, and themes visually using `taskforce-settings` or from your system app menu.
 - **Configurable**: Display time, volume, sound toggle, custom GIF and audio file paths via `~/.config/taskforce/config.json`.
-- **Ultra-Fast & Non-Blocking**: Runs detached in the background without slowing down the agent loop.
+- **Universal Multi-Terminal Support**: Automatically monitors all open agent terminal sessions via systemd service.
+
+## 🚀 Quick Install (Any Linux Laptop)
+
+Clone and run the 1-step installer:
+
+```bash
+git clone https://github.com/ishalmf/taskforce.git
+cd taskforce
+./install.sh
+```
+
+The installer automatically:
+1. Verifies system dependencies (Python 3 & GTK3).
+2. Installs `taskforce-notify` and `taskforce-settings` to `~/.local/bin`.
+3. Adds **Taskforce Settings** to your desktop application launcher.
+4. Registers automatic hooks for Antigravity CLI and Gemini CLI.
+5. Starts the background watcher daemon (`taskforce.service`) via systemd.
+
+To uninstall cleanly anytime:
+```bash
+./uninstall.sh
+```
 
 ## Quick CLI Usage
 
