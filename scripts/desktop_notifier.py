@@ -359,12 +359,125 @@ def show_popup(status="completed", message=None, config=None, drag_mode=False):
     popup.show_all()
     Gtk.main()
 
+def should_throttle(status="completed", min_interval=4.0):
+    """Prevent spamming multiple notifications within a short window."""
+    cooldown_file = Path("/tmp/taskforce_last_notify")
+    now = time.time()
+    if cooldown_file.exists():
+        try:
+            with open(cooldown_file, "r") as f:
+                last_time = float(f.read().strip())
+                if now - last_time < min_interval:
+                    return True
+        except Exception:
+            pass
+    try:
+        with open(cooldown_file, "w") as f:
+            f.write(str(now))
+    except Exception:
+        pass
+    return False
+
+SUBAGENT_CACHE = {}
+
+def is_subagent_transcript(conv_path):
+    """Returns True if the transcript belongs to an internal subagent."""
+    conv_path = Path(conv_path)
+    conv_id = conv_path.parent.parent.parent.name
+    if conv_id in SUBAGENT_CACHE:
+        return SUBAGENT_CACHE[conv_id]
+
+    if not conv_path.exists():
+        return False
+
+    try:
+        with open(conv_path, "r", encoding="utf-8", errors="replace") as f:
+            # Check the first few lines of transcript
+            for _ in range(4):
+                line = f.readline()
+                if not line:
+                    break
+                data = json.loads(line)
+                # Subagents are injected with CHECKPOINT in step 1
+                if data.get("type") == "CHECKPOINT" and "{{ CHECKPOINT" in data.get("content", ""):
+                    SUBAGENT_CACHE[conv_id] = True
+                    return True
+    except Exception:
+        pass
+
+    SUBAGENT_CACHE[conv_id] = False
+    return False
+
+def has_pending_work(conv_path):
+    """
+    Returns True if the session has active background tasks or active subagents
+    that have not yet finished or responded.
+    """
+    try:
+        size = os.path.getsize(conv_path)
+        with open(conv_path, "r", encoding="utf-8", errors="replace") as f:
+            # Read last 64KB
+            f.seek(max(0, size - 65536))
+            lines = f.readlines()
+            if not lines:
+                return False
+            if size > 65536 and len(lines) > 1:
+                lines = lines[1:]
+
+            import re
+            pending_tasks = set()
+            pending_subagents = set()
+
+            for ln in lines:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    d = json.loads(ln)
+                except Exception:
+                    continue
+
+                content = d.get("content", "")
+                if isinstance(content, str):
+                    if "Tool is running as a background task with task id:" in content:
+                        m = re.search(r'task id: ([\w\-]+(?:/[\w\-]+)?)', content)
+                        if m:
+                            pending_tasks.add(m.group(1).split("/")[-1])
+                    if "finished with result:" in content:
+                        m = re.search(r'Task id \"([^\"]+)\" finished', content)
+                        if m:
+                            tid = m.group(1).split("/")[-1]
+                            pending_tasks.discard(tid)
+
+                    if "Created the following subagents:" in content:
+                        ids = re.findall(r'\"conversationId\":\s*\"([^\"]+)\"', content)
+                        for sid in ids:
+                            pending_subagents.add(sid)
+                            SUBAGENT_CACHE[sid] = True
+                    if "sender=" in content:
+                        m = re.search(r'sender=([\w\-]+)', content)
+                        if m:
+                            pending_subagents.discard(m.group(1))
+
+            if len(pending_tasks) > 0 or len(pending_subagents) > 0:
+                return True
+    except Exception:
+        pass
+    return False
+
 def handle_hook_stop():
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
+        transcript_path = payload.get("transcriptPath")
+        if transcript_path:
+            if is_subagent_transcript(transcript_path) or has_pending_work(transcript_path):
+                return
+
+        if should_throttle("completed", min_interval=4.0):
+            return
+
         termination = payload.get("terminationReason", "model_stop")
-        # Only notify when the model stops normally or finishes tasks
         if termination in ("model_stop", "normal", None, ""):
             cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -378,9 +491,15 @@ def handle_hook_tool():
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
+        transcript_path = payload.get("transcriptPath")
+        if transcript_path and is_subagent_transcript(transcript_path):
+            return
+
         tool_call = payload.get("toolCall", {})
         tool_name = tool_call.get("name", "")
         if tool_name == "ask_question":
+            if should_throttle("help", min_interval=3.0):
+                return
             cmd = [
                 sys.executable,
                 str(Path(__file__).resolve()),
@@ -423,12 +542,14 @@ def run_watcher():
     # Initialize with current latest step_index to avoid alerting on old historical turns
     if brain_dir.exists():
         for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
+            if is_subagent_transcript(conv_path):
+                continue
             conv_id = conv_path.parent.parent.parent.name
             data = get_last_json(conv_path)
             if data:
                 last_notified_step[conv_id] = data.get("step_index", 0)
 
-    print("Taskforce watcher active. Monitoring active sessions across all terminals...")
+    print("Taskforce watcher active. Monitoring active root sessions across all terminals...")
     env = os.environ.copy()
     if "DISPLAY" not in env:
         env["DISPLAY"] = ":0"
@@ -440,6 +561,10 @@ def run_watcher():
                 continue
             now = time.time()
             for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
+                # 1. Ignore internal subagents completely
+                if is_subagent_transcript(conv_path):
+                    continue
+
                 conv_id = conv_path.parent.parent.parent.name
                 try:
                     mtime = os.path.getmtime(conv_path)
@@ -465,14 +590,20 @@ def run_watcher():
                             for tc in tool_calls:
                                 if tc.get("name") == "ask_question":
                                     last_notified_step[conv_id] = step_idx
-                                    cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "help"]
-                                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    if not should_throttle("help", min_interval=3.0):
+                                        cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "help"]
+                                        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                                     break
                         else:
-                            # Agent completed response and finished its turn!
+                            # 2. Check if the parent agent has pending background tasks or subagents
+                            if has_pending_work(conv_path):
+                                continue
+
+                            # 3. True completion! Turn finished with no pending work
                             last_notified_step[conv_id] = step_idx
-                            cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
-                            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            if not should_throttle("completed", min_interval=4.0):
+                                cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
+                                subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
         except KeyboardInterrupt:
