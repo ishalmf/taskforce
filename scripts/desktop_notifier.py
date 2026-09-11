@@ -10,6 +10,7 @@ import json
 import argparse
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -121,17 +122,41 @@ class AgentPopup(Gtk.Window):
         visual = screen.get_rgba_visual()
         if visual and screen.is_composited():
             self.set_visual(visual)
-        self.set_app_paintable(True)
 
-        # Connect draw event for modern card styling
-        self.connect("draw", self.on_draw)
+        # Style with GTK CSS
+        css_provider = Gtk.CssProvider()
+        css = """
+        window {
+            background-color: transparent;
+        }
+        .agent-card {
+            background-color: rgba(15, 23, 42, 0.94);
+            border-radius: 16px;
+            border: 2px solid #34d399;
+            padding: 14px 18px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        .agent-card.status-help {
+            border-color: #fbbf24;
+        }
+        .agent-card.status-drag {
+            border-color: #60a5fa;
+        }
+        """
+        css_provider.load_from_data(css.encode('utf-8'))
+        Gtk.StyleContext.add_provider_for_screen(
+            screen,
+            css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
 
         # Build UI layout
         main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
-        main_box.set_margin_top(14)
-        main_box.set_margin_bottom(14)
-        main_box.set_margin_start(16)
-        main_box.set_margin_end(18)
+        main_box.get_style_context().add_class("agent-card")
+        if self.status == "help":
+            main_box.get_style_context().add_class("status-help")
+        elif self.drag_mode:
+            main_box.get_style_context().add_class("status-drag")
 
         # Determine GIF asset
         gif_path = self.config.get("completed_gif")
@@ -199,37 +224,6 @@ class AgentPopup(Gtk.Window):
         if not self.drag_mode:
             duration_ms = self.config.get("duration_ms", 4000)
             GLib.timeout_add(duration_ms, self.close_popup)
-
-    def on_draw(self, widget, ctx):
-        ctx.save()
-        width = widget.get_allocated_width()
-        height = widget.get_allocated_height()
-        radius = 16
-
-        # Draw rounded rectangle path
-        ctx.new_sub_path()
-        ctx.arc(width - radius, radius, radius, -1.5707963, 0)
-        ctx.arc(width - radius, height - radius, radius, 0, 1.5707963)
-        ctx.arc(radius, height - radius, radius, 1.5707963, 3.1415926)
-        ctx.arc(radius, radius, radius, 3.1415926, 4.7123889)
-        ctx.close_path()
-
-        # Dark translucent glass: rgba(15, 23, 42, 0.94)
-        ctx.set_source_rgba(0.06, 0.09, 0.16, 0.94)
-        ctx.fill_preserve()
-
-        # Outline border
-        if self.status == "help":
-            ctx.set_source_rgba(0.98, 0.75, 0.14, 0.8)  # Amber
-        elif self.drag_mode:
-            ctx.set_source_rgba(0.38, 0.65, 0.98, 0.9)  # Blue
-        else:
-            ctx.set_source_rgba(0.2, 0.83, 0.6, 0.8)   # Emerald
-        ctx.set_line_width(1.8)
-        ctx.stroke()
-
-        ctx.restore()
-        return False
 
     def on_realize(self, widget):
         self.reposition()
@@ -349,6 +343,28 @@ def handle_hook_tool():
         sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
         sys.stdout.flush()
 
+def get_last_json(conv_path):
+    try:
+        size = os.path.getsize(conv_path)
+        with open(conv_path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(max(0, size - 262144))
+            lines = f.readlines()
+            if not lines:
+                return None
+            if size > 262144 and len(lines) > 1:
+                lines = lines[1:]
+            for ln in reversed(lines):
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    return json.loads(ln)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return None
+
 def run_watcher():
     brain_dir = Path.home() / ".gemini" / "antigravity-cli" / "brain"
     last_notified_step = {}
@@ -357,20 +373,18 @@ def run_watcher():
     if brain_dir.exists():
         for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
             conv_id = conv_path.parent.parent.parent.name
-            try:
-                with open(conv_path, "r", encoding="utf-8") as f:
-                    f.seek(max(0, os.path.getsize(conv_path) - 8192))
-                    lines = f.readlines()
-                    if lines:
-                        last_obj = json.loads(lines[-1].strip())
-                        last_notified_step[conv_id] = last_obj.get("step_index", 0)
-            except Exception:
-                pass
+            data = get_last_json(conv_path)
+            if data:
+                last_notified_step[conv_id] = data.get("step_index", 0)
 
-    print(f"Taskforce watcher active. Monitoring active sessions across all terminals...")
+    print("Taskforce watcher active. Monitoring active sessions across all terminals...")
+    env = os.environ.copy()
+    if "DISPLAY" not in env:
+        env["DISPLAY"] = ":0"
+
     while True:
         try:
-            time.sleep(0.6)
+            time.sleep(0.5)
             if not brain_dir.exists():
                 continue
             now = time.time()
@@ -381,41 +395,33 @@ def run_watcher():
                     if now - mtime > 300:  # Skip sessions idle for more than 5 minutes
                         continue
 
-                    with open(conv_path, "r", encoding="utf-8") as f:
-                        size = os.path.getsize(conv_path)
-                        f.seek(max(0, size - 8192))
-                        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-                        if not lines:
-                            continue
-                        last_line = lines[-1]
-                        data = json.loads(last_line)
-                        step_idx = data.get("step_index", 0)
-                        last_seen = last_notified_step.get(conv_id, 0)
-                        if step_idx <= last_seen:
-                            continue
+                    data = get_last_json(conv_path)
+                    if not data:
+                        continue
 
-                        source = data.get("source")
-                        msg_type = data.get("type")
-                        status = data.get("status")
+                    step_idx = data.get("step_index", 0)
+                    last_seen = last_notified_step.get(conv_id, 0)
+                    if step_idx <= last_seen:
+                        continue
 
-                        if source == "MODEL" and msg_type == "PLANNER_RESPONSE" and status == "DONE":
-                            tool_calls = data.get("tool_calls", [])
-                            if tool_calls:
-                                for tc in tool_calls:
-                                    if tc.get("name") == "ask_question":
-                                        last_notified_step[conv_id] = step_idx
-                                        subprocess.Popen(
-                                            [sys.executable, str(Path(__file__).resolve()), "--status", "help", "--bg"],
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                                        )
-                                        break
-                            else:
-                                # Agent completed response and finished its turn!
-                                last_notified_step[conv_id] = step_idx
-                                subprocess.Popen(
-                                    [sys.executable, str(Path(__file__).resolve()), "--status", "completed", "--bg"],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                                )
+                    source = data.get("source")
+                    msg_type = data.get("type")
+                    status = data.get("status")
+
+                    if source == "MODEL" and msg_type == "PLANNER_RESPONSE" and status == "DONE":
+                        tool_calls = data.get("tool_calls", [])
+                        if tool_calls:
+                            for tc in tool_calls:
+                                if tc.get("name") == "ask_question":
+                                    last_notified_step[conv_id] = step_idx
+                                    cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "help"]
+                                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    break
+                        else:
+                            # Agent completed response and finished its turn!
+                            last_notified_step[conv_id] = step_idx
+                            cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
+                            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 except Exception:
                     pass
         except KeyboardInterrupt:
