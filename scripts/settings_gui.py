@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "margin_x": 32,
     "margin_y": 48,
     "duration_ms": 4000,
-    "sound_enabled": true,
+    "sound_enabled": True,
     "volume": 0.8,
     "completed_gif": str(PUBLIC_DIR / "taskforce-mascot.gif"),
     "completed_sound": str(PUBLIC_DIR / "taskforce-chime.wav"),
