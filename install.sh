@@ -139,7 +139,33 @@ if [ -d "$GEMINI_CLI_DIR" ]; then
   ln -sf "$GEMINI_CONFIG_DIR/hooks.json" "$GEMINI_CLI_DIR/hooks.json"
 fi
 
-# 8. Setup and start background systemd service
+# 8. Configure OpenCode plugin (if OpenCode is installed or configured)
+OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
+if [ -d "$OPENCODE_CONFIG_DIR" ] || command -v opencode >/dev/null 2>&1; then
+  echo "--> Configuring OpenCode integration..."
+  mkdir -p "$OPENCODE_CONFIG_DIR/plugins"
+  cp "$REPO_DIR/integrations/opencode/taskforce.js" "$OPENCODE_CONFIG_DIR/plugins/taskforce.js"
+  if [ -f "$OPENCODE_CONFIG_DIR/opencode.jsonc" ]; then
+    python3 -c "
+import json, os
+p = os.path.expanduser('~/.config/opencode/opencode.jsonc')
+try:
+  with open(p, 'r') as f:
+    data = json.load(f)
+except Exception:
+  data = {'\$schema': 'https://opencode.ai/config.json'}
+plugins = data.get('plugin', [])
+plug_path = os.path.expanduser('~/.config/opencode/plugins/taskforce.js')
+if plug_path not in plugins:
+  plugins.append(plug_path)
+  data['plugin'] = plugins
+  with open(p, 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null || true
+  fi
+fi
+
+# 9. Setup and start background systemd service
 if command -v systemctl >/dev/null 2>&1; then
   echo "--> Setting up systemd background watcher service..."
   mkdir -p "$SYSTEMD_USER_DIR"

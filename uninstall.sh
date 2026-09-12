@@ -25,6 +25,7 @@ command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$
 echo "--> Removing agent hooks..."
 rm -f "$HOME/.gemini/config/hooks.json"
 rm -f "$HOME/.gemini/antigravity-cli/hooks.json"
+rm -f "$HOME/.config/opencode/plugins/taskforce.js"
 
 echo "=== Taskforce uninstalled cleanly. ==="
 echo "Note: Configuration in ~/.config/taskforce has been preserved."

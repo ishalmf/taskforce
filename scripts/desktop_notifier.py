@@ -573,11 +573,84 @@ def get_last_json(conv_path):
         pass
     return None
 
+OPENCODE_DB = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+
+def get_latest_opencode_event_id():
+    """Get the highest event id currently in OpenCode's sqlite database."""
+    if not OPENCODE_DB.exists():
+        return None
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True)
+        cur = con.cursor()
+        cur.execute("SELECT id FROM event ORDER BY id DESC LIMIT 1;")
+        row = cur.fetchone()
+        con.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+def check_opencode_events(last_seen_id, env):
+    """
+    Query OpenCode database for newly finished assistant turns (both thinking and tool calls)
+    and permission requests.
+    """
+    if not OPENCODE_DB.exists():
+        return last_seen_id
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True)
+        cur = con.cursor()
+        if last_seen_id:
+            cur.execute(
+                "SELECT id, aggregate_id, type, data FROM event WHERE id > ? ORDER BY id ASC LIMIT 50;",
+                (last_seen_id,)
+            )
+        else:
+            cur.execute("SELECT id, aggregate_id, type, data FROM event ORDER BY id DESC LIMIT 1;")
+        rows = cur.fetchall()
+        con.close()
+
+        for row in rows:
+            evt_id, session_id, event_type, data_str = row
+            last_seen_id = max(last_seen_id or evt_id, evt_id)
+            if not data_str:
+                continue
+            try:
+                data = json.loads(data_str)
+            except Exception:
+                continue
+
+            # Assistant finished generation (pure talk/thinking OR tool-calling)
+            if event_type == "message.updated.1":
+                info = data.get("info", {})
+                if info.get("role") == "assistant" and info.get("finish") == "stop" and "completed" in info.get("time", {}):
+                    msg_id = info.get("id", evt_id)
+                    if mark_and_check_step(session_id, msg_id, event_type="completed"):
+                        cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
+                        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Permission requested (user assistance needed)
+            elif event_type in ("permission.updated.1", "permission.updated"):
+                status = data.get("status") or data.get("properties", {}).get("status")
+                if status == "ask":
+                    perm_id = data.get("id") or evt_id
+                    if mark_and_check_step(session_id, perm_id, event_type="help"):
+                        cmd = [
+                            sys.executable,
+                            str(Path(__file__).resolve()),
+                            "--status", "help",
+                            "--message", "OpenCode needs your permission to proceed!"
+                        ]
+                        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    return last_seen_id
+
 def run_watcher():
     brain_dir = Path.home() / ".gemini" / "antigravity-cli" / "brain"
     last_notified_step = {}
 
-    # Initialize with current latest step_index to avoid alerting on old historical turns
+    # Initialize with current latest step_index for Antigravity
     if brain_dir.exists():
         for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
             if is_subagent_transcript(conv_path):
@@ -587,7 +660,10 @@ def run_watcher():
             if data:
                 last_notified_step[conv_id] = data.get("step_index", 0)
 
-    print("Taskforce watcher active. Monitoring active root sessions across all terminals...")
+    # Initialize OpenCode last seen event
+    last_opencode_event_id = get_latest_opencode_event_id()
+
+    print("Taskforce watcher active. Monitoring active root sessions (Antigravity & OpenCode)...")
     env = os.environ.copy()
     if "DISPLAY" not in env:
         env["DISPLAY"] = ":0"
@@ -595,55 +671,60 @@ def run_watcher():
     while True:
         try:
             time.sleep(0.5)
-            if not brain_dir.exists():
-                continue
-            now = time.time()
-            for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
-                # 1. Ignore internal subagents completely
-                if is_subagent_transcript(conv_path):
-                    continue
 
-                conv_id = conv_path.parent.parent.parent.name
-                try:
-                    mtime = os.path.getmtime(conv_path)
-                    if now - mtime > 300:  # Skip sessions idle for more than 5 minutes
+            # 1. Check OpenCode events (works for simple talk, thinking, and tool execution)
+            if OPENCODE_DB.exists():
+                last_opencode_event_id = check_opencode_events(last_opencode_event_id, env)
+
+            # 2. Check Antigravity CLI events
+            if brain_dir.exists():
+                now = time.time()
+                for conv_path in brain_dir.glob("*/.system_generated/logs/transcript.jsonl"):
+                    # Ignore internal subagents completely
+                    if is_subagent_transcript(conv_path):
                         continue
 
-                    data = get_last_json(conv_path)
-                    if not data:
-                        continue
+                    conv_id = conv_path.parent.parent.parent.name
+                    try:
+                        mtime = os.path.getmtime(conv_path)
+                        if now - mtime > 300:  # Skip sessions idle for more than 5 minutes
+                            continue
 
-                    step_idx = data.get("step_index", 0)
-                    last_seen = last_notified_step.get(conv_id, 0)
-                    if step_idx <= last_seen:
-                        continue
+                        data = get_last_json(conv_path)
+                        if not data:
+                            continue
 
-                    source = data.get("source")
-                    msg_type = data.get("type")
-                    status = data.get("status")
+                        step_idx = data.get("step_index", 0)
+                        last_seen = last_notified_step.get(conv_id, 0)
+                        if step_idx <= last_seen:
+                            continue
 
-                    if source == "MODEL" and msg_type == "PLANNER_RESPONSE" and status == "DONE":
-                        tool_calls = data.get("tool_calls", [])
-                        if tool_calls:
-                            for tc in tool_calls:
-                                if tc.get("name") == "ask_question":
-                                    last_notified_step[conv_id] = step_idx
-                                    if mark_and_check_step(conv_id, step_idx, event_type="help"):
-                                        cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "help"]
-                                        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                    break
-                        else:
-                            # 2. Check if the parent agent has pending background tasks or subagents
-                            if has_pending_work(conv_path):
-                                continue
+                        source = data.get("source")
+                        msg_type = data.get("type")
+                        status = data.get("status")
 
-                            # 3. True completion! (Covers both tool execution tasks AND pure thinking/talk responses)
-                            last_notified_step[conv_id] = step_idx
-                            if mark_and_check_step(conv_id, step_idx, event_type="completed"):
-                                cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
-                                subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+                        if source == "MODEL" and msg_type == "PLANNER_RESPONSE" and status == "DONE":
+                            tool_calls = data.get("tool_calls", [])
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    if tc.get("name") == "ask_question":
+                                        last_notified_step[conv_id] = step_idx
+                                        if mark_and_check_step(conv_id, step_idx, event_type="help"):
+                                            cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "help"]
+                                            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                        break
+                            else:
+                                # Check if the parent agent has pending background tasks or subagents
+                                if has_pending_work(conv_path):
+                                    continue
+
+                                # True completion! (Covers both tool execution tasks AND pure thinking/talk responses)
+                                last_notified_step[conv_id] = step_idx
+                                if mark_and_check_step(conv_id, step_idx, event_type="completed"):
+                                    cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
+                                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
         except KeyboardInterrupt:
             break
         except Exception:
