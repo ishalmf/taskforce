@@ -94,8 +94,8 @@ fn save_overlay_position(
 fn finish_positioning(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    save_overlay_position(app.clone(), state)?;
+) -> Result<AppSettings, String> {
+    save_overlay_position(app.clone(), state.clone())?;
     let window = app
         .get_webview_window("overlay")
         .ok_or("Signal window is unavailable")?;
@@ -107,7 +107,12 @@ fn finish_positioning(
     window
         .set_focusable(false)
         .map_err(|error| error.to_string())?;
-    window.hide().map_err(|error| error.to_string())
+    window.hide().map_err(|error| error.to_string())?;
+    Ok(state
+        .settings
+        .lock()
+        .expect("Taskforce settings lock was poisoned")
+        .clone())
 }
 
 #[tauri::command]

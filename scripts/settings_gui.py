@@ -10,6 +10,10 @@ import json
 import subprocess
 from pathlib import Path
 
+# Prefer X11 backend if DISPLAY is available so window positioning and dragging work reliably on Linux (X11 / XWayland)
+if os.environ.get("DISPLAY") and not os.environ.get("GDK_BACKEND"):
+    os.environ["GDK_BACKEND"] = "x11,wayland"
+
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
@@ -455,6 +459,18 @@ class SettingsWindow(Gtk.Window):
         footer.pack_start(btn_save, False, False, 0)
 
         main_vbox.pack_start(footer, False, False, 0)
+        self.disable_scroll_on_controls(main_vbox)
+
+    def _on_control_scroll(self, widget, event):
+        widget.stop_emission_by_name("scroll-event")
+        return False
+
+    def disable_scroll_on_controls(self, container):
+        if isinstance(container, (Gtk.Scale, Gtk.Range, Gtk.ComboBox, Gtk.SpinButton)):
+            container.connect("scroll-event", self._on_control_scroll)
+        if isinstance(container, Gtk.Container):
+            for child in container.get_children():
+                self.disable_scroll_on_controls(child)
 
     def update_image_preview(self, img_widget, path):
         if path and os.path.exists(path):
@@ -547,7 +563,13 @@ class SettingsWindow(Gtk.Window):
         def wait_and_update():
             p.wait()
             self.config = load_config()
-            GLib.idle_add(lambda: self.combo_pos.set_active_id("custom"))
+            x = self.config.get("custom_x")
+            y = self.config.get("custom_y")
+            def update_ui():
+                self.combo_pos.set_active_id("custom")
+                if x is not None and y is not None:
+                    self.lbl_status.set_markup(f'<span color="#34d399">✔ Mascot position saved at ({x}, {y})!</span>')
+            GLib.idle_add(update_ui)
         threading.Thread(target=wait_and_update, daemon=True).start()
 
     def collect_config(self):

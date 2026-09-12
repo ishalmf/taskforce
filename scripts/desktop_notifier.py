@@ -13,6 +13,10 @@ import threading
 import time
 from pathlib import Path
 
+# Prefer X11 backend if DISPLAY is available so window positioning and dragging work reliably on Linux (X11 / XWayland)
+if os.environ.get("DISPLAY") and not os.environ.get("GDK_BACKEND"):
+    os.environ["GDK_BACKEND"] = "x11,wayland"
+
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
@@ -124,8 +128,11 @@ class AgentPopup(Gtk.Window):
         self.config = config or load_config()
         self.drag_mode = drag_mode
         self.dragging = False
+        self.has_moved = False
         self.drag_start_x = 0
         self.drag_start_y = 0
+        self.win_start_x = 0
+        self.win_start_y = 0
 
         # Window settings
         self.set_decorated(False)
@@ -252,12 +259,13 @@ class AgentPopup(Gtk.Window):
         self.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK
             | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
             | Gdk.EventMask.KEY_PRESS_MASK
-            | Gdk.EventMask.STRUCTURE_MASK
         )
         self.connect("button-press-event", self.on_button_press)
+        self.connect("button-release-event", self.on_button_release)
+        self.connect("motion-notify-event", self.on_motion)
         self.connect("key-press-event", self.on_key_press)
-        self.connect("configure-event", self.on_configure_event)
 
         # Calculate position after realized
         self.connect("realize", self.on_realize)
@@ -278,16 +286,6 @@ class AgentPopup(Gtk.Window):
             if gdk_win:
                 cursor = Gdk.Cursor.new_from_name(Gdk.Display.get_default(), "grab")
                 gdk_win.set_cursor(cursor)
-
-    def on_configure_event(self, widget, event):
-        if self.drag_mode:
-            cur_x, cur_y = self.get_position()
-            self.config["position"] = "custom"
-            self.config["custom_x"] = cur_x
-            self.config["custom_y"] = cur_y
-            save_config(self.config)
-            self.desc_lbl.set_markup('<span font_size="9500" color="#34d399">✔ Saved! Click [Done] to close</span>')
-        return False
 
     def reposition(self):
         display = Gdk.Display.get_default()
@@ -329,19 +327,54 @@ class AgentPopup(Gtk.Window):
     def on_button_press(self, widget, event):
         if event.button == 1:  # Left click
             if self.drag_mode:
-                # Hardware-accelerated native window manager drag
-                self.begin_move_drag(
-                    event.button,
-                    int(event.x_root),
-                    int(event.y_root),
-                    event.time
-                )
+                self.dragging = True
+                self.has_moved = False
+                self.drag_start_x = event.x_root
+                self.drag_start_y = event.y_root
+                cur_x, cur_y = self.get_position()
+                self.win_start_x = cur_x
+                self.win_start_y = cur_y
+                gdk_win = self.get_window()
+                if gdk_win:
+                    cursor = Gdk.Cursor.new_from_name(Gdk.Display.get_default(), "grabbing")
+                    gdk_win.set_cursor(cursor)
             else:
                 self.close_popup()
         elif event.button in (2, 3):  # Right or middle click
             self.close_popup()
 
+    def on_motion(self, widget, event):
+        if self.drag_mode and self.dragging:
+            dx = event.x_root - self.drag_start_x
+            dy = event.y_root - self.drag_start_y
+            if abs(dx) > 2 or abs(dy) > 2:
+                self.has_moved = True
+            new_x = int(self.win_start_x + dx)
+            new_y = int(self.win_start_y + dy)
+            self.move(max(0, new_x), max(0, new_y))
+
+    def on_button_release(self, widget, event):
+        if self.drag_mode and self.dragging:
+            self.dragging = False
+            gdk_win = self.get_window()
+            if gdk_win:
+                cursor = Gdk.Cursor.new_from_name(Gdk.Display.get_default(), "grab")
+                gdk_win.set_cursor(cursor)
+            if self.has_moved:
+                cur_x, cur_y = self.get_position()
+                self.config["position"] = "custom"
+                self.config["custom_x"] = cur_x
+                self.config["custom_y"] = cur_y
+                save_config(self.config)
+                self.desc_lbl.set_markup('<span font_size="9500" color="#34d399">✔ Saved! Click [Done] to close</span>')
+
     def close_popup(self):
+        if self.drag_mode and self.has_moved:
+            cur_x, cur_y = self.get_position()
+            self.config["position"] = "custom"
+            self.config["custom_x"] = cur_x
+            self.config["custom_y"] = cur_y
+            save_config(self.config)
         if self.auto_close_timer:
             GLib.source_remove(self.auto_close_timer)
             self.auto_close_timer = None

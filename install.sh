@@ -180,6 +180,7 @@ ExecStart=/usr/bin/python3 %h/.local/bin/taskforce-notify --watch
 Restart=always
 RestartSec=3
 Environment=DISPLAY=:0
+Environment=GDK_BACKEND=x11,wayland
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

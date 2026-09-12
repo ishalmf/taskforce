@@ -158,6 +158,9 @@ async function load(): Promise<void> {
 
 durationInput.addEventListener("input", updateOutputs);
 volumeInput.addEventListener("input", updateOutputs);
+for (const input of [durationInput, volumeInput]) {
+  input.addEventListener("wheel", (e) => e.preventDefault(), { passive: false });
+}
 
 getElement<HTMLButtonElement>("save-settings").addEventListener("click", async () => {
   try {
@@ -183,7 +186,7 @@ let positioning = false;
 positionButton.addEventListener("click", async () => {
   try {
     if (positioning) {
-      await invoke("finish_positioning");
+      settings = await invoke<AppSettings>("finish_positioning");
       positionButton.textContent = "Position character";
       setStatus("Character position saved.");
     } else {
