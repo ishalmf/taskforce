@@ -464,20 +464,56 @@ def is_subagent_transcript(conv_path):
     SUBAGENT_CACHE[conv_id] = False
     return False
 
+def get_sqlite_idle_status(conv_id):
+    """
+    Query Antigravity's conversation_summaries.db for authoritative idle state.
+    Returns:
+      True  -> active background work / subagents (not_fully_idle == 1)
+      False -> fully idle (not_fully_idle == 0)
+      None  -> database unavailable or conversation not found
+    """
+    db_path = Path.home() / ".gemini" / "antigravity-cli" / "conversation_summaries.db"
+    if not db_path.exists():
+        return None
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT not_fully_idle FROM conversation_summaries WHERE conversation_id = ? LIMIT 1;",
+            (conv_id,)
+        )
+        row = cur.fetchone()
+        con.close()
+        if row is not None:
+            return bool(row[0])
+    except Exception:
+        pass
+    return None
+
 def has_pending_work(conv_path):
     """
     Returns True if the session has active background tasks or active subagents
     that have not yet finished or responded.
     """
+    conv_path = Path(conv_path)
+    conv_id = conv_path.parent.parent.parent.name
+
+    # 1. Authoritative check via SQLite database
+    sql_idle = get_sqlite_idle_status(conv_id)
+    if sql_idle is not None:
+        return sql_idle
+
+    # 2. Fallback: Parse transcript with robust matching for tasks, timers, and cancellations
     try:
         size = os.path.getsize(conv_path)
         with open(conv_path, "r", encoding="utf-8", errors="replace") as f:
-            # Read last 64KB
-            f.seek(max(0, size - 65536))
+            # Read up to 512KB (was 64KB, which truncated long session outputs)
+            f.seek(max(0, size - 524288))
             lines = f.readlines()
             if not lines:
                 return False
-            if size > 65536 and len(lines) > 1:
+            if size > 524288 and len(lines) > 1:
                 lines = lines[1:]
 
             import re
@@ -494,26 +530,37 @@ def has_pending_work(conv_path):
                     continue
 
                 content = d.get("content", "")
-                if isinstance(content, str):
-                    if "Tool is running as a background task with task id:" in content:
-                        m = re.search(r'task id: ([\w\-]+(?:/[\w\-]+)?)', content)
-                        if m:
-                            pending_tasks.add(m.group(1).split("/")[-1])
-                    if "finished with result:" in content:
-                        m = re.search(r'Task id \"([^\"]+)\" finished', content)
-                        if m:
-                            tid = m.group(1).split("/")[-1]
-                            pending_tasks.discard(tid)
+                if not isinstance(content, str):
+                    continue
 
-                    if "Created the following subagents:" in content:
-                        ids = re.findall(r'\"conversationId\":\s*\"([^\"]+)\"', content)
-                        for sid in ids:
-                            pending_subagents.add(sid)
-                            SUBAGENT_CACHE[sid] = True
-                    if "sender=" in content:
-                        m = re.search(r'sender=([\w\-]+)', content)
-                        if m:
-                            pending_subagents.discard(m.group(1))
+                # Background task launched
+                if "Tool is running as a background task with task id:" in content:
+                    m = re.search(r'task id:\s*([\w\-]+(?:/[\w\-]+)?)', content)
+                    if m:
+                        pending_tasks.add(m.group(1).split("/")[-1])
+
+                # Message received from background task or timer (sender=<conv_id>/<task_id>)
+                sender_task = re.search(r'sender=[\w\-]+/([\w\-]+)', content)
+                if sender_task:
+                    pending_tasks.discard(sender_task.group(1))
+
+                # Background task finished, cancelled, or killed
+                if "Task id" in content or 'Task "' in content or "cancelled" in content or "finished with result:" in content:
+                    fin_m = re.search(r'Task (?:id )?\"([^\"]+)\"', content)
+                    if fin_m:
+                        pending_tasks.discard(fin_m.group(1).split("/")[-1])
+
+                # Subagents launched
+                if "Created the following subagents:" in content:
+                    ids = re.findall(r'\"conversationId\":\s*\"([^\"]+)\"', content)
+                    for sid in ids:
+                        pending_subagents.add(sid)
+                        SUBAGENT_CACHE[sid] = True
+
+                # Subagent responded
+                sub_sender = re.search(r'sender=([\w\-]+)', content)
+                if sub_sender and sub_sender.group(1) in pending_subagents:
+                    pending_subagents.discard(sub_sender.group(1))
 
             if len(pending_tasks) > 0 or len(pending_subagents) > 0:
                 return True
@@ -529,13 +576,24 @@ def handle_hook_stop():
         conv_id = payload.get("conversationId", "unknown")
         step_idx = payload.get("stepIdx", 0)
 
-        if transcript_path:
-            if is_subagent_transcript(transcript_path) or has_pending_work(transcript_path):
-                return
+        if transcript_path and is_subagent_transcript(transcript_path):
+            return
 
-        # Ensure the agent engine reports fullyIdle (all background tasks done)
+        # 1. First priority: Check engine's explicit fullyIdle flag
+        # If the engine explicitly reports fullyIdle is False, background tasks are still running
         if payload.get("fullyIdle") is False:
             return
+
+        # 2. If fullyIdle was not provided, fallback to pending work check
+        if payload.get("fullyIdle") is None and transcript_path:
+            if has_pending_work(transcript_path):
+                return
+
+        # 3. Get accurate step_index from transcript if omitted from Stop hook payload
+        if (not step_idx or step_idx == 0) and transcript_path:
+            last_data = get_last_json(transcript_path)
+            if last_data:
+                step_idx = last_data.get("step_index", 0)
 
         termination = payload.get("terminationReason", "model_stop")
         if termination in ("model_stop", "normal", None, ""):
@@ -720,7 +778,7 @@ def run_watcher():
                     conv_id = conv_path.parent.parent.parent.name
                     try:
                         mtime = os.path.getmtime(conv_path)
-                        if now - mtime > 300:  # Skip sessions idle for more than 5 minutes
+                        if now - mtime > 3600:  # Skip sessions idle for more than 1 hour (was 300s, which dropped long tasks)
                             continue
 
                         data = get_last_json(conv_path)

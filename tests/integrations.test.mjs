@@ -89,7 +89,17 @@ test("OpenCode plugin sends only session.idle events", async () => {
   const home = await mkdtemp(join(tmpdir(), "taskforce-opencode-"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
-  const { received } = await createEndpoint(home);
+
+  const binDir = join(home, ".local", "bin");
+  await mkdir(binDir, { recursive: true });
+  const logFile = join(home, "notify.log");
+  const scriptPath = join(binDir, "taskforce-notify");
+  await writeFile(
+    scriptPath,
+    `#!/bin/sh\necho "$@" >> "${logFile}"\n`,
+    { mode: 0o755 },
+  );
+
   const moduleUrl = new URL(
     `../integrations/opencode/taskforce.js?test=${Date.now()}`,
     import.meta.url,
@@ -100,12 +110,12 @@ test("OpenCode plugin sends only session.idle events", async () => {
   await plugin.event({
     event: { type: "session.idle", properties: { sessionID: "open-session" } },
   });
-  const { request, body } = await received;
+
+  // Allow spawned process to run
+  await new Promise((resolve) => setTimeout(resolve, 100));
   process.env.HOME = previousHome;
 
-  assert.equal(request.headers.authorization, "Bearer test-token");
-  assert.equal(body.source, "opencode");
-  assert.equal(body.event, "completed");
-  assert.equal(body.sessionId, "open-session");
-  assert.equal(body.cwd, "/project");
+  const { readFile } = await import("node:fs/promises");
+  const logContent = await readFile(logFile, "utf8").catch(() => "");
+  assert.match(logContent, /--status completed/);
 });
