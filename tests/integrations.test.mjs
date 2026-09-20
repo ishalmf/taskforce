@@ -85,7 +85,7 @@ test("Gemini hook emits a private completion event and valid hook output", async
   assert.equal(body.sessionId, "gemini-session");
 });
 
-test("OpenCode plugin sends only session.idle events", async () => {
+test("OpenCode plugin filters subagents and triggers on root completion, cancellation, and questions", async () => {
   const home = await mkdtemp(join(tmpdir(), "taskforce-opencode-"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
@@ -106,16 +106,67 @@ test("OpenCode plugin sends only session.idle events", async () => {
   );
   const { TaskforcePlugin } = await import(moduleUrl);
   const plugin = await TaskforcePlugin({ directory: "/project" });
-  await plugin.event({ event: { type: "message.updated" } });
-  await plugin.event({
-    event: { type: "session.idle", properties: { sessionID: "open-session" } },
-  });
-
-  // Allow spawned process to run
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  process.env.HOME = previousHome;
 
   const { readFile } = await import("node:fs/promises");
-  const logContent = await readFile(logFile, "utf8").catch(() => "");
+
+  // 1. Subagent creation and idle event must NOT trigger any popup
+  await plugin.event({
+    event: {
+      type: "session.created",
+      properties: {
+        info: { id: "subagent-session-1", parentID: "root-session-1" },
+      },
+    },
+  });
+  await plugin.event({
+    event: {
+      type: "session.idle",
+      properties: { sessionID: "subagent-session-1" },
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  let logContent = await readFile(logFile, "utf8").catch(() => "");
+  assert.equal(logContent, "", "Subagent completion should not trigger any notification");
+
+  // 2. Question / permission requested triggers help popup
+  await plugin.event({
+    event: {
+      type: "permission.asked",
+      properties: { sessionID: "root-session-1", status: "ask" },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  logContent = await readFile(logFile, "utf8").catch(() => "");
+  assert.match(logContent, /--status help/);
+
+  // 3. Cancelled/aborted turn triggers completion with cancel message
+  await plugin.event({
+    event: {
+      type: "message.updated",
+      properties: {
+        sessionID: "root-session-1",
+        info: {
+          role: "assistant",
+          error: { name: "MessageAbortedError", message: "Aborted" },
+        },
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  logContent = await readFile(logFile, "utf8").catch(() => "");
+  assert.match(logContent, /Task was cancelled/);
+
+  // 4. Root session completes its answer and goes idle
+  await plugin.event({
+    event: {
+      type: "session.idle",
+      properties: { sessionID: "root-session-1" },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  logContent = await readFile(logFile, "utf8").catch(() => "");
   assert.match(logContent, /--status completed/);
+
+  process.env.HOME = previousHome;
 });

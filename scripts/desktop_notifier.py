@@ -681,10 +681,40 @@ def get_latest_opencode_event_id():
     except Exception:
         return None
 
+OPENCODE_SUBAGENTS_CACHE = {}
+
+def is_opencode_subagent(session_id, con=None):
+    """Returns True if the OpenCode session belongs to a child / subagent session."""
+    if not session_id:
+        return False
+    if session_id in OPENCODE_SUBAGENTS_CACHE:
+        return OPENCODE_SUBAGENTS_CACHE[session_id]
+
+    should_close = False
+    try:
+        if con is None:
+            if not OPENCODE_DB.exists():
+                return False
+            import sqlite3
+            con = sqlite3.connect(f"file:{OPENCODE_DB}?mode=ro", uri=True)
+            should_close = True
+
+        cur = con.cursor()
+        cur.execute("SELECT parent_id FROM session WHERE id = ? LIMIT 1;", (session_id,))
+        row = cur.fetchone()
+        is_sub = bool(row and row[0])
+        OPENCODE_SUBAGENTS_CACHE[session_id] = is_sub
+        return is_sub
+    except Exception:
+        return False
+    finally:
+        if should_close and con:
+            con.close()
+
 def check_opencode_events(last_seen_id, env):
     """
-    Query OpenCode database for newly finished assistant turns (both thinking and tool calls)
-    and permission requests.
+    Query OpenCode database for newly finished assistant turns (both thinking and tool calls),
+    cancellations, and permission/question requests. Ignores subagent sessions.
     """
     if not OPENCODE_DB.exists():
         return last_seen_id
@@ -700,30 +730,49 @@ def check_opencode_events(last_seen_id, env):
         else:
             cur.execute("SELECT id, aggregate_id, type, data FROM event ORDER BY id DESC LIMIT 1;")
         rows = cur.fetchall()
-        con.close()
 
         for row in rows:
             evt_id, session_id, event_type, data_str = row
             last_seen_id = max(last_seen_id or evt_id, evt_id)
             if not data_str:
                 continue
+
+            # Ignore subagents: only root sessions trigger completion or question popups
+            if is_opencode_subagent(session_id, con):
+                continue
+
             try:
                 data = json.loads(data_str)
             except Exception:
                 continue
 
-            # Assistant finished generation (pure talk/thinking OR tool-calling)
+            # 1. Assistant completed response or turn was cancelled
             if event_type == "message.updated.1":
                 info = data.get("info", {})
-                if info.get("role") == "assistant" and info.get("finish") == "stop" and "completed" in info.get("time", {}):
-                    msg_id = info.get("id", evt_id)
-                    if mark_and_check_step(session_id, msg_id, event_type="completed"):
-                        cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
-                        subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Permission requested (user assistance needed)
-            elif event_type in ("permission.updated.1", "permission.updated"):
+                if info.get("role") == "assistant":
+                    error = info.get("error")
+                    # Check for cancellation / abort
+                    if error and (error.get("name") in ("MessageAbortedError", "AbortError") or "abort" in str(error).lower() or "cancel" in str(error).lower()):
+                        msg_id = info.get("id", evt_id)
+                        if mark_and_check_step(session_id, msg_id, event_type="completed"):
+                            cmd = [
+                                sys.executable,
+                                str(Path(__file__).resolve()),
+                                "--status", "completed",
+                                "--message", "Task was cancelled"
+                            ]
+                            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    # Normal completion (pure talk/thinking OR tool-calling finished)
+                    elif info.get("finish") == "stop" and "completed" in info.get("time", {}):
+                        msg_id = info.get("id", evt_id)
+                        if mark_and_check_step(session_id, msg_id, event_type="completed"):
+                            cmd = [sys.executable, str(Path(__file__).resolve()), "--status", "completed"]
+                            subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 2. Permission requested (user assistance needed)
+            elif event_type in ("permission.updated.1", "permission.updated", "permission.asked", "permission.v2.asked"):
                 status = data.get("status") or data.get("properties", {}).get("status")
-                if status == "ask":
+                if status == "ask" or "asked" in event_type:
                     perm_id = data.get("id") or evt_id
                     if mark_and_check_step(session_id, perm_id, event_type="help"):
                         cmd = [
@@ -733,6 +782,19 @@ def check_opencode_events(last_seen_id, env):
                             "--message", "OpenCode needs your permission to proceed!"
                         ]
                         subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # 3. Question asked
+            elif "question" in event_type:
+                q_id = data.get("id") or evt_id
+                if mark_and_check_step(session_id, q_id, event_type="help"):
+                    cmd = [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--status", "help",
+                        "--message", "OpenCode has a question for you!"
+                    ]
+                    subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        con.close()
     except Exception:
         pass
     return last_seen_id
