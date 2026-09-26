@@ -86,6 +86,35 @@ if [ ! -f "$CONFIG_DIR/config.json" ]; then
   "border_radius": 16
 }
 EOF
+else
+  # Repair stale or missing asset paths if the repository was moved
+  python3 -c "
+import json, os
+cfg_file = os.path.expanduser('~/.config/taskforce/config.json')
+repo_dir = '$REPO_DIR'
+try:
+    with open(cfg_file, 'r') as f:
+        data = json.load(f)
+    changed = False
+    for key, filename in [
+        ('completed_gif', 'taskforce-mascot.gif'),
+        ('completed_sound', 'taskforce-chime.wav'),
+        ('help_gif', 'taskforce-help.gif'),
+        ('help_sound', 'taskforce-help.wav')
+    ]:
+        val = data.get(key)
+        if not val or not os.path.exists(val):
+            new_path = os.path.join(repo_dir, 'public', filename)
+            if os.path.exists(new_path):
+                data[key] = new_path
+                changed = True
+    if changed:
+        with open(cfg_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        print('    Repaired asset paths in config.json')
+except Exception:
+    pass
+" 2>/dev/null || true
 fi
 
 # 6. Install desktop application launcher
@@ -189,6 +218,7 @@ EOF
 
   systemctl --user daemon-reload
   systemctl --user enable --now taskforce.service
+  systemctl --user restart taskforce.service
   echo "    Service active: $(systemctl --user is-active taskforce.service 2>/dev/null || echo 'running')"
 fi
 
